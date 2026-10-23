@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bazel build timeline</title>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --page: #f9f9f7;
+    --surface-1: #fcfcfb;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --muted: #898781;
+    --grid: #e1e0d9;
+    --axis: #c3c2b7;
+    --border: rgba(11, 11, 11, 0.10);
+    --hover: rgba(11, 11, 11, 0.06);
+    --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+    --series-5: #e87ba4; --series-6: #008300; --series-7: #6250d6; --series-other: #b5b3ab;
+    --critical: #0b0b0b;
+    --phase-a: #efeee9; --phase-b: #e6e5df;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface-1: #1a1a19; --text-primary: #f0efec; --text-secondary: #c3c2b7;
+      --muted: #898781; --grid: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, 0.10);
+      --hover: rgba(255, 255, 255, 0.08);
+      --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+      --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-other: #5c5b56;
+      --critical: #f0efec; --phase-a: #242423; --phase-b: #2c2c2a;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface-1: #1a1a19; --text-primary: #f0efec; --text-secondary: #c3c2b7;
+    --muted: #898781; --grid: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, 0.10);
+    --hover: rgba(255, 255, 255, 0.08);
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+    --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-other: #5c5b56;
+    --critical: #f0efec; --phase-a: #242423; --phase-b: #2c2c2a;
+  }
+  html, body { margin: 0; }
+  body.viz-root {
+    background: var(--page); color: var(--text-primary);
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1600px; margin: 0 auto; padding: 16px 20px 40px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; margin-bottom: 8px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  h2 { font-size: 14px; margin: 0 0 6px; font-weight: 600; }
+  h2 small { font-weight: 400; color: var(--text-secondary); margin-left: 6px; }
+  .meta { color: var(--text-secondary); }
+  .meta b { color: var(--text-primary); font-weight: 600; }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 8px 0 12px; color: var(--text-secondary); }
+  button {
+    font: inherit; color: var(--text-primary); background: var(--surface-1);
+    border: 1px solid var(--border); border-radius: 6px; padding: 3px 10px; cursor: pointer;
+  }
+  button:hover { background: var(--hover); }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+  canvas { display: block; width: 100%; }
+  .plot { cursor: grab; touch-action: none; }
+  .plot.dragging { cursor: grabbing; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 6px 0 2px; color: var(--text-secondary); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+  .sw.cp { background: transparent; border: 2px solid var(--critical); width: 8px; height: 8px; }
+  .sw.line { height: 2px; border-radius: 1px; width: 14px; }
+  .chart-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .chart-head .legend { margin: 0; }
+  #tooltip {
+    position: fixed; pointer-events: none; z-index: 10; max-width: 520px; display: none;
+    background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 9px; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  }
+  #tooltip .t-name { font-weight: 600; word-break: break-all; }
+  #tooltip .t-sub { color: var(--text-secondary); word-break: break-all; }
+  #tooltip table { border-collapse: collapse; margin-top: 2px; }
+  #tooltip td { padding: 0 8px 0 0; }
+  .num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(480px, 1fr)); gap: 12px; }
+  table.data { border-collapse: collapse; width: 100%; }
+  table.data th { text-align: left; font-weight: 600; color: var(--text-secondary); border-bottom: 1px solid var(--axis); padding: 4px 6px; }
+  table.data th.num { text-align: right; }
+  table.data td { border-bottom: 1px solid var(--grid); padding: 3px 6px; vertical-align: top; }
+  table.data td.name { word-break: break-all; }
+  table.data tr.link { cursor: pointer; }
+  table.data tr.link:hover td { background: var(--hover); }
+  .bar { height: 8px; border-radius: 0 4px 4px 0; display: inline-block; vertical-align: middle; }
+  .sub { color: var(--text-secondary); }
+  footer { color: var(--muted); margin-top: 18px; }
+</style>
+</head>
+<body class="viz-root">
+<main>
+  <header>
+    <h1>Bazel build timeline</h1>
+    <div class="meta" id="meta"></div>
+  </header>
+  <div class="toolbar">
+    <button id="reset">Reset zoom</button>
+    <span>Scroll or pinch to zoom. Drag or swipe sideways to pan. Double-click to zoom in. All charts stay aligned.</span>
+  </div>
+
+  <section class="card">
+    <h2>Execution · worker threads <small id="lane-summary"></small></h2>
+    <canvas id="timeline" class="plot"></canvas>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <section class="card">
+    <h2>Navigator <small>Drag the window to scroll. Drag its edges to change the zoom.</small></h2>
+    <canvas id="navigator"></canvas>
+  </section>
+
+  <div id="charts"></div>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>Slowest work · total time by kind</h2>
+      <table class="data" id="by-key"></table>
+    </section>
+    <section class="card">
+      <h2>Critical path <small id="cp-total"></small></h2>
+      <table class="data" id="critical"></table>
+    </section>
+  </div>
+  <section class="card">
+    <h2>Longest spans <small>Click a row to zoom to the span.</small></h2>
+    <table class="data" id="longest"></table>
+  </section>
+  <section class="card">
+    <h2>Build phases</h2>
+    <table class="data" id="phases"></table>
+  </section>
+  <footer>Generated from the Bazel JSON trace profile. All data stays in this file. The report makes no network requests.</footer>
+</main>
+<div id="tooltip"></div>
+
+<script>
+"use strict";
+const DATA = /*__REPORT_DATA__*/null;
+
+// ---------- formatting ----------
+function fmtDur(us) {
+  if (us < 1000) return Math.round(us) + " µs";
+  if (us < 1e6) return (us / 1000).toFixed(us < 1e4 ? 2 : 1) + " ms";
+  const s = us / 1e6;
+  if (s < 60) return s.toFixed(s < 10 ? 2 : 1) + " s";
+  const m = Math.floor(s / 60);
+  return m + "m " + String(Math.round(s - m * 60)).padStart(2, "0") + "s";
+}
+function fmtTime(us, step) {
+  const s = us / 1e6;
+  if (step !== undefined && step < 1e3) return (us / 1000).toFixed(step < 100 ? 2 : 1) + " ms";
+  if (step !== undefined && step < 1e6) return s.toFixed(step < 1e5 ? 3 : 2) + " s";
+  if (Math.abs(s) < 60) return s.toFixed(step !== undefined && step < 1e7 ? 1 : 0) + " s";
+  const m = Math.floor(s / 60);
+  return m + ":" + String(Math.floor(s - m * 60)).padStart(2, "0");
+}
+function fmtNum(v) {
+  const a = Math.abs(v);
+  if (a >= 1e4) return Math.round(v).toLocaleString("en-US");
+  if (a >= 100) return v.toFixed(0);
+  if (a >= 10) return v.toFixed(1);
+  return v.toFixed(2);
+}
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" })[c]);
+}
+
+// ---------- theme ----------
+let theme = {};
+function readTheme() {
+  const cs = getComputedStyle(document.body);
+  const v = n => cs.getPropertyValue(n).trim();
+  theme = {
+    surface: v("--surface-1"), text: v("--text-primary"), text2: v("--text-secondary"), muted: v("--muted"),
+    grid: v("--grid"), axis: v("--axis"), hover: v("--hover"), critical: v("--critical"),
+    phaseA: v("--phase-a"), phaseB: v("--phase-b"),
+    series: [1, 2, 3, 4, 5, 6, 7].map(i => v("--series-" + i)), other: v("--series-other"),
+  };
+}
+function keyColor(k) {
+  return DATA.keys[k] === "Other" ? theme.other : theme.series[k % theme.series.length];
+}
+
+// ---------- model ----------
+const S = DATA.strings;
+const T0 = DATA.meta.start, T1 = Math.max(DATA.meta.end, DATA.meta.start + 1);
+const view = { t0: T0, t1: T1 };
+const GUTTER = 210, PAD_R = 14;
+const LANE_H = 13, BAR_H = 10, AXIS_H = 20, PHASE_H = 18;
+const laneRows = [];
+laneRows.push({ kind: "phases", name: "Build phases" });
+if (DATA.criticalPath.length) laneRows.push({ kind: "critical", name: "Critical path" });
+DATA.lanes.forEach(l => laneRows.push({ kind: "lane", name: l.name, spans: l.spans }));
+
+let hoverT = null;
+
+function plotWidth(cssW) { return cssW - GUTTER - PAD_R; }
+function xOf(t, cssW) { return GUTTER + (t - view.t0) / (view.t1 - view.t0) * plotWidth(cssW); }
+function tOf(x, cssW) { return view.t0 + (x - GUTTER) / plotWidth(cssW) * (view.t1 - view.t0); }
+
+function niceStep(range, px, minPx) {
+  const raw = range * minPx / Math.max(px, 1);
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  for (const m of [1, 2, 5, 10]) if (m * pow >= raw) return m * pow;
+  return 10 * pow;
+}
+
+// ---------- canvas helpers ----------
+function setupCanvas(canvas, cssH) {
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth;
+  if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    canvas.style.height = cssH + "px";
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+  return { ctx, w: cssW, h: cssH };
+}
+function roundRect(ctx, x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  if (r <= 0.5) { ctx.rect(x, y, w, h); return; }
+  ctx.roundRect(x, y, w, h, r);
+}
+function drawTimeGrid(ctx, w, top, bottom, withLabels) {
+  const step = niceStep(view.t1 - view.t0, plotWidth(w), 90);
+  ctx.strokeStyle = theme.grid; ctx.lineWidth = 1;
+  ctx.fillStyle = theme.muted; ctx.font = "11px system-ui, -apple-system, sans-serif";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  for (let t = Math.ceil(view.t0 / step) * step; t <= view.t1; t += step) {
+    const x = Math.round(xOf(t, w)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+    if (withLabels) ctx.fillText(fmtTime(t, step), x, AXIS_H / 2);
+  }
+}
+function clipPlot(ctx, w, h) {
+  ctx.save(); ctx.beginPath(); ctx.rect(GUTTER, 0, plotWidth(w), h); ctx.clip();
+}
+function drawHoverLine(ctx, w, top, bottom) {
+  if (hoverT === null || hoverT < view.t0 || hoverT > view.t1) return;
+  const x = Math.round(xOf(hoverT, w)) + 0.5;
+  ctx.strokeStyle = theme.text2; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+  ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+  ctx.setLineDash([]);
+}
+function laneLabel(ctx, text, y, h, color) {
+  ctx.fillStyle = color || theme.text2; ctx.font = "11px system-ui, -apple-system, sans-serif";
+  ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  let s = text;
+  while (s.length > 4 && ctx.measureText(s).width > GUTTER - 14) s = "…" + s.slice(2);
+  ctx.fillText(s, GUTTER - 8, y + h / 2);
+}
+
+// ---------- timeline ----------
+const timeline = document.getElementById("timeline");
+function rowTop(i) { return AXIS_H + (i === 0 ? 0 : PHASE_H + (i - 1) * LANE_H); }
+function rowHeight(i) { return i === 0 ? PHASE_H : LANE_H; }
+function timelineHeight() { return rowTop(laneRows.length - 1) + LANE_H + 4; }
+
+function firstVisible(spans, t0) {
+  // Spans in a lane do not overlap, so their ends are sorted as well as their starts.
+  let lo = 0, hi = spans.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (spans[mid][0] + spans[mid][1] < t0) lo = mid + 1; else hi = mid;
+  }
+  return lo;
+}
+
+function drawTimeline() {
+  const { ctx, w, h } = setupCanvas(timeline, timelineHeight());
+  drawTimeGrid(ctx, w, AXIS_H, h, true);
+  const pxPerUs = plotWidth(w) / (view.t1 - view.t0);
+  laneRows.forEach((row, i) => {
+    const y = rowTop(i), rh = rowHeight(i);
+    laneLabel(ctx, row.name, y, rh, row.kind === "lane" ? theme.text2 : theme.text);
+  });
+  clipPlot(ctx, w, h);
+  laneRows.forEach((row, i) => {
+    const y = rowTop(i), rh = rowHeight(i);
+    if (row.kind === "phases") {
+      DATA.phases.forEach((p, j) => {
+        if (p.end < view.t0 || p.start > view.t1 || p.end <= p.start) return;
+        const x0 = xOf(p.start, w), x1 = xOf(p.end, w);
+        ctx.fillStyle = j % 2 ? theme.phaseB : theme.phaseA;
+        ctx.fillRect(x0, y + 1, Math.max(1, x1 - x0 - 2), rh - 3);
+        const vx0 = Math.max(x0, GUTTER) + 4, vx1 = Math.min(x1, w - PAD_R) - 4;
+        if (vx1 - vx0 > 30) {
+          ctx.save(); ctx.beginPath(); ctx.rect(vx0, y, vx1 - vx0, rh); ctx.clip();
+          ctx.fillStyle = theme.text2; ctx.font = "11px system-ui, -apple-system, sans-serif";
+          ctx.textAlign = "left"; ctx.textBaseline = "middle";
+          ctx.fillText(p.name, vx0, y + rh / 2 - 1);
+          ctx.restore();
+        }
+      });
+      return;
+    }
+    if (row.kind === "critical") {
+      DATA.criticalPath.forEach(c => {
+        if (c.start + c.dur < view.t0 || c.start > view.t1) return;
+        const x0 = xOf(c.start, w), bw = Math.max(1, c.dur * pxPerUs - (c.dur * pxPerUs > 4 ? 2 : 0));
+        ctx.strokeStyle = theme.critical; ctx.lineWidth = 1.5;
+        ctx.beginPath(); roundRect(ctx, x0 + 0.75, y + 1.75, Math.max(0.5, bw - 1.5), BAR_H - 1.5, 3); ctx.stroke();
+      });
+      return;
+    }
+    const spans = row.spans;
+    let lastX = -1, lastKey = -1;
+    for (let k = firstVisible(spans, view.t0); k < spans.length; k++) {
+      const s = spans[k];
+      if (s[0] > view.t1) break;
+      const x0 = xOf(s[0], w), wpx = s[1] * pxPerUs;
+      // Tiny spans that fall into the same device pixel are painted once.
+      if (wpx < 1 && Math.floor(x0) === lastX && s[2] === lastKey) continue;
+      lastX = Math.floor(x0); lastKey = s[2];
+      ctx.fillStyle = keyColor(s[2]);
+      const bw = wpx > 4 ? wpx - 2 : Math.max(1, wpx);
+      ctx.beginPath(); roundRect(ctx, x0, y + 1, bw, BAR_H, wpx > 8 ? 3 : 0); ctx.fill();
+      if (s[5]) {
+        ctx.strokeStyle = theme.critical; ctx.lineWidth = 1.5;
+        ctx.beginPath(); roundRect(ctx, x0 + 0.75, y + 1.75, Math.max(0.5, bw - 1.5), BAR_H - 1.5, 3); ctx.stroke();
+      }
+      if (wpx > 60) {
+        ctx.save(); ctx.beginPath(); ctx.rect(Math.max(x0, GUTTER) + 3, y, Math.min(bw, w) - 6, LANE_H); ctx.clip();
+        const k2 = DATA.keys[s[2]];
+        ctx.fillStyle = (k2 === "Other" || s[2] === 3) ? theme.text : "#ffffff";
+        ctx.font = "10px system-ui, -apple-system, sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+        ctx.fillText(S[s[3]], Math.max(x0, GUTTER) + 4, y + 1 + BAR_H / 2);
+        ctx.restore();
+      }
+    }
+  });
+  ctx.restore();
+  drawHoverLine(ctx, w, AXIS_H, h);
+}
+
+function timelineHit(x, y) {
+  const w = timeline.clientWidth;
+  if (x < GUTTER || x > w - PAD_R) return null;
+  let i = -1;
+  for (let r = 0; r < laneRows.length; r++) if (y >= rowTop(r) && y < rowTop(r) + rowHeight(r)) { i = r; break; }
+  if (i < 0) return null;
+  const row = laneRows[i];
+  const t = tOf(x, w), slack = 3 * (view.t1 - view.t0) / plotWidth(w);
+  if (row.kind === "phases") {
+    const p = DATA.phases.find(p => t >= p.start && t < p.end);
+    return p && { title: p.name, sub: "Build phase", rows: [["Start", fmtTime(p.start)], ["Duration", fmtDur(p.end - p.start)]] };
+  }
+  if (row.kind === "critical") {
+    const c = DATA.criticalPath.find(c => t >= c.start - slack && t <= c.start + c.dur + slack);
+    return c && { title: c.name, sub: "Critical path component", rows: [["Start", fmtTime(c.start)], ["Duration", fmtDur(c.dur)]] };
+  }
+  const spans = row.spans;
+  let best = null, bestDist = Infinity;
+  for (let k = firstVisible(spans, t - slack); k < spans.length && spans[k][0] <= t + slack; k++) {
+    const s = spans[k];
+    const d = t < s[0] ? s[0] - t : t > s[0] + s[1] ? t - s[0] - s[1] : 0;
+    if (d < bestDist) { best = s; bestDist = d; }
+  }
+  if (!best) return null;
+  const rows = [["Lane", row.name], ["Start", fmtTime(best[0])], ["Duration", fmtDur(best[1])]];
+  if (best[5]) rows.push(["Critical path", "yes"]);
+  return { title: S[best[3]], sub: S[best[4]], rows, color: keyColor(best[2]) };
+}
+
+// ---------- legend & summary ----------
+function renderLegend() {
+  const totals = DATA.keys.map(() => 0);
+  let count = 0;
+  DATA.lanes.forEach(l => l.spans.forEach(s => { totals[s[2]] += s[1]; count++; }));
+  const items = DATA.keys.map((k, i) => `<span><i class="sw" style="background:${keyColor(i)}"></i>${esc(k)}</span>`);
+  if (DATA.criticalPath.length) items.push(`<span><i class="sw cp"></i>On the critical path</span>`);
+  document.getElementById("legend").innerHTML = items.join("");
+  document.getElementById("lane-summary").textContent =
+    `${DATA.lanes.length} lanes · ${count.toLocaleString("en-US")} top-level spans`;
+  return totals;
+}
+
+// ---------- counter charts ----------
+const CHART_GROUPS = [
+  { title: "CPU usage", unit: "cores", names: ["CPU usage (total)", "CPU usage (Bazel)"] },
+  { title: "Actions running", unit: "actions", names: ["action count", "action count (local)"] },
+  { title: "Bazel server memory", unit: "MB", names: ["Memory usage (Bazel)"], gc: true },
+  { title: "System memory", unit: "MB", names: ["Memory usage (total)"] },
+  { title: "Worker memory", unit: "MB", names: ["Total worker memory usage", "Per-mnemonic worker memory usage"] },
+  { title: "System load average", unit: "", names: ["System load average"] },
+  { title: "Network", unit: "Mbps", names: ["Network Down usage (total)", "Network Up usage (total)"] },
+];
+const SERIES_LABELS = {
+  "CPU usage (total)/system cpu": "System", "CPU usage (Bazel)/cpu": "Bazel server",
+  "action count/action": "All actions", "action count/local action cache": "Local action cache",
+  "action count (local)/local action": "Local actions",
+  "Memory usage (Bazel)/memory": "Bazel server", "Memory usage (total)/system memory": "System",
+  "Network Down usage (total)/system network down (Mbps)": "Down",
+  "Network Up usage (total)/system network up (Mbps)": "Up",
+  "System load average/load": "Load",
+};
+const CHART_H = 96;
+const charts = [];
+
+function buildCharts() {
+  const byName = new Map(DATA.counters.map(c => [c.name, c]));
+  const used = new Set();
+  const groups = [];
+  for (const g of CHART_GROUPS) {
+    const series = [];
+    for (const n of g.names) {
+      const c = byName.get(n);
+      if (!c) continue;
+      used.add(n);
+      c.series.forEach(s => series.push({ label: SERIES_LABELS[n + "/" + s.name] || (c.series.length > 1 || n.startsWith("Per-mnemonic") ? s.name : n), points: s.points }));
+    }
+    if (series.some(s => s.points.length)) groups.push({ ...g, series });
+  }
+  DATA.counters.filter(c => !used.has(c.name)).forEach(c =>
+    groups.push({ title: c.name, unit: "", series: c.series.map(s => ({ label: s.name, points: s.points })) }));
+
+  const host = document.getElementById("charts");
+  groups.forEach(g => {
+    const card = document.createElement("section");
+    card.className = "card";
+    const max = Math.max(0, ...g.series.flatMap(s => s.points.map(p => p[1])));
+    const legend = g.series.length > 1 || g.gc
+      ? `<div class="legend">${g.series.map((s, i) => `<span><i class="sw line" style="background:var(--series-${i + 1})"></i>${esc(s.label)}</span>`).join("")}${g.gc && DATA.gc.length ? `<span><i class="sw" style="background:var(--muted);width:3px"></i>GC pause</span>` : ""}</div>`
+      : "";
+    card.innerHTML = `<div class="chart-head"><h2>${esc(g.title)}${g.unit ? ` <small>${esc(g.unit)}</small>` : ""}<small>peak ${fmtNum(max)}</small></h2>${legend}</div><canvas class="plot"></canvas>`;
+    host.appendChild(card);
+    const canvas = card.querySelector("canvas");
+    const chart = { ...g, canvas, max: niceMax(max) };
+    charts.push(chart);
+    attachPlotInteraction(canvas, (x, y) => chartHit(chart, x, y));
+  });
+}
+
+function niceMax(v) {
+  if (v <= 0) return 1;
+  const pow = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const m of [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]) if (m * pow >= v) return m * pow;
+  return 10 * pow;
+}
+
+function drawChart(chart) {
+  const { ctx, w, h } = setupCanvas(chart.canvas, CHART_H);
+  const top = 6, bottom = h - 4;
+  const yOf = v => bottom - v / chart.max * (bottom - top);
+  drawTimeGrid(ctx, w, top, bottom, false);
+  ctx.font = "11px system-ui, -apple-system, sans-serif"; ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  for (const f of [0, 0.5, 1]) {
+    const y = Math.round(yOf(chart.max * f)) + 0.5;
+    ctx.strokeStyle = f === 0 ? theme.axis : theme.grid; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(GUTTER, y); ctx.lineTo(w - PAD_R, y); ctx.stroke();
+    ctx.fillStyle = theme.muted; ctx.fillText(fmtNum(chart.max * f), GUTTER - 8, y);
+  }
+  clipPlot(ctx, w, h);
+  if (chart.gc) {
+    ctx.fillStyle = theme.muted;
+    DATA.gc.forEach(g => {
+      if (g.start + g.dur < view.t0 || g.start > view.t1) return;
+      const x0 = xOf(g.start, w), x1 = xOf(g.start + g.dur, w);
+      ctx.fillRect(x0, top, Math.max(1.5, x1 - x0), bottom - top);
+    });
+  }
+  chart.series.forEach((s, i) => {
+    ctx.strokeStyle = theme.series[i % theme.series.length]; ctx.lineWidth = 2; ctx.lineJoin = "round";
+    ctx.beginPath();
+    let started = false;
+    s.points.forEach(p => {
+      const x = xOf(p[0], w), y = yOf(p[1]);
+      if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  });
+  ctx.restore();
+  drawHoverLine(ctx, w, top, bottom);
+  if (hoverT !== null && hoverT >= view.t0 && hoverT <= view.t1) {
+    chart.series.forEach((s, i) => {
+      const p = nearestPoint(s.points, hoverT);
+      if (!p) return;
+      ctx.fillStyle = theme.series[i % theme.series.length]; ctx.strokeStyle = theme.surface; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(xOf(p[0], w), yOf(p[1]), 4, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    });
+  }
+}
+
+function nearestPoint(points, t) {
+  if (!points.length) return null;
+  let lo = 0, hi = points.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (points[mid][0] < t) lo = mid + 1; else hi = mid;
+  }
+  if (lo > 0 && Math.abs(points[lo - 1][0] - t) < Math.abs(points[lo][0] - t)) lo--;
+  return points[lo];
+}
+
+function chartHit(chart, x) {
+  const w = chart.canvas.clientWidth;
+  if (x < GUTTER || x > w - PAD_R) return null;
+  const t = tOf(x, w);
+  const rows = chart.series.map((s, i) => {
+    const p = nearestPoint(s.points, t);
+    return [`<i class="sw line" style="background:var(--series-${i + 1})"></i> ${esc(s.label)}`, p ? fmtNum(p[1]) + (chart.unit ? " " + chart.unit : "") : "–"];
+  });
+  const gc = chart.gc && DATA.gc.find(g => t >= g.start && t <= g.start + g.dur + 2 * (view.t1 - view.t0) / plotWidth(w));
+  if (gc) rows.push(["GC pause", `${esc(gc.name)}, ${fmtDur(gc.dur)}`]);
+  return { title: chart.title, sub: "At " + fmtTime(t), rows, html: true };
+}
+
+// ---------- navigator ----------
+const nav = document.getElementById("navigator");
+const NAV_H = 46;
+let navDensity = null;
+function computeDensity(buckets) {
+  const d = new Float64Array(buckets);
+  const span = (T1 - T0) / buckets;
+  DATA.lanes.forEach(l => l.spans.forEach(s => {
+    let a = (s[0] - T0) / span, b = (s[0] + s[1] - T0) / span;
+    for (let i = Math.max(0, Math.floor(a)); i < Math.min(buckets, Math.ceil(b)); i++) {
+      d[i] += Math.min(b, i + 1) - Math.max(a, i);
+    }
+  }));
+  return d;
+}
+function navX(t, w) { return GUTTER + (t - T0) / (T1 - T0) * plotWidth(w); }
+function navT(x, w) { return T0 + (x - GUTTER) / plotWidth(w) * (T1 - T0); }
+function drawNavigator() {
+  const { ctx, w, h } = setupCanvas(nav, NAV_H);
+  const pw = Math.max(1, Math.floor(plotWidth(w)));
+  if (!navDensity || navDensity.length !== pw) navDensity = computeDensity(pw);
+  const max = Math.max(1, ...navDensity);
+  laneLabel(ctx, "Busy lanes", 0, h, theme.text2);
+  ctx.fillStyle = theme.series[0];
+  ctx.beginPath(); ctx.moveTo(GUTTER, h - 2);
+  for (let i = 0; i < pw; i++) ctx.lineTo(GUTTER + i, h - 2 - navDensity[i] / max * (h - 8));
+  ctx.lineTo(GUTTER + pw, h - 2); ctx.closePath();
+  ctx.globalAlpha = 0.55; ctx.fill(); ctx.globalAlpha = 1;
+  const x0 = navX(view.t0, w), x1 = navX(view.t1, w);
+  ctx.fillStyle = theme.hover;
+  ctx.fillRect(GUTTER, 0, x0 - GUTTER, h); ctx.fillRect(x1, 0, w - PAD_R - x1, h);
+  ctx.strokeStyle = theme.text; ctx.lineWidth = 1.5;
+  ctx.beginPath(); roundRect(ctx, x0, 1, Math.max(2, x1 - x0), h - 2, 4); ctx.stroke();
+  ctx.fillStyle = theme.text;
+  ctx.fillRect(x0 - 2, h / 2 - 8, 4, 16); ctx.fillRect(x1 - 2, h / 2 - 8, 4, 16);
+}
+
+let navDrag = null;
+nav.addEventListener("pointerdown", e => {
+  const w = nav.clientWidth, x = e.offsetX;
+  const x0 = navX(view.t0, w), x1 = navX(view.t1, w);
+  if (Math.abs(x - x0) < 6) navDrag = { mode: "left" };
+  else if (Math.abs(x - x1) < 6) navDrag = { mode: "right" };
+  else if (x > x0 && x < x1) navDrag = { mode: "move", t: navT(x, w), t0: view.t0, t1: view.t1 };
+  else {
+    const half = (view.t1 - view.t0) / 2, c = navT(x, w);
+    setView(c - half, c + half);
+    navDrag = { mode: "move", t: c, t0: view.t0, t1: view.t1 };
+  }
+  nav.setPointerCapture(e.pointerId);
+});
+nav.addEventListener("pointermove", e => {
+  const w = nav.clientWidth, x = e.offsetX;
+  if (!navDrag) {
+    const x0 = navX(view.t0, w), x1 = navX(view.t1, w);
+    nav.style.cursor = Math.abs(x - x0) < 6 || Math.abs(x - x1) < 6 ? "ew-resize" : x > x0 && x < x1 ? "grab" : "pointer";
+    return;
+  }
+  const t = navT(x, w), minSpan = (T1 - T0) / 1e5;
+  if (navDrag.mode === "left") setView(Math.min(t, view.t1 - minSpan), view.t1);
+  else if (navDrag.mode === "right") setView(view.t0, Math.max(t, view.t0 + minSpan));
+  else { const d = t - navDrag.t; setView(navDrag.t0 + d, navDrag.t1 + d); }
+});
+nav.addEventListener("pointerup", () => { navDrag = null; });
+
+// ---------- view & interaction ----------
+function setView(t0, t1) {
+  const span = Math.min(T1 - T0, Math.max(t1 - t0, 10));
+  if (t0 < T0) t0 = T0;
+  if (t0 + span > T1) t0 = T1 - span;
+  view.t0 = t0; view.t1 = t0 + span;
+  requestDraw();
+  const hash = view.t0 === T0 && view.t1 === T1 ? "" : `#view=${(view.t0 / 1e6).toFixed(4)},${(view.t1 / 1e6).toFixed(4)}`;
+  if (location.hash !== hash) history.replaceState(null, "", hash || location.pathname + location.search);
+}
+function zoomAt(t, factor) {
+  setView(t - (t - view.t0) * factor, t + (view.t1 - t) * factor);
+}
+
+const tooltip = document.getElementById("tooltip");
+function showTooltip(info, e) {
+  if (!info) { tooltip.style.display = "none"; return; }
+  const rows = info.rows.map(r => `<tr><td class="sub">${info.html ? r[0] : esc(r[0])}</td><td class="num">${info.html ? r[1] : esc(r[1])}</td></tr>`).join("");
+  tooltip.innerHTML = `<div class="t-name">${info.color ? `<i class="sw" style="background:${info.color}"></i> ` : ""}${esc(info.title)}</div>` +
+    (info.sub ? `<div class="t-sub">${esc(info.sub)}</div>` : "") + `<table>${rows}</table>`;
+  tooltip.style.display = "block";
+  const r = tooltip.getBoundingClientRect();
+  let x = e.clientX + 14, y = e.clientY + 14;
+  if (x + r.width > window.innerWidth - 8) x = e.clientX - r.width - 14;
+  if (y + r.height > window.innerHeight - 8) y = e.clientY - r.height - 14;
+  tooltip.style.left = Math.max(8, x) + "px"; tooltip.style.top = Math.max(8, y) + "px";
+}
+
+function attachPlotInteraction(canvas, hit) {
+  let drag = null;
+  canvas.addEventListener("wheel", e => {
+    if (e.offsetX < GUTTER) return;
+    e.preventDefault();
+    const w = canvas.clientWidth;
+    if (!e.ctrlKey && Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+      const dt = e.deltaX / plotWidth(w) * (view.t1 - view.t0);
+      setView(view.t0 + dt, view.t1 + dt);
+    } else {
+      const k = e.deltaMode === 1 ? 16 : 1;
+      zoomAt(tOf(e.offsetX, w), Math.exp(e.deltaY * k * (e.ctrlKey ? 0.01 : 0.002)));
+    }
+  }, { passive: false });
+  canvas.addEventListener("pointerdown", e => {
+    if (e.button !== 0) return;
+    drag = { x: e.clientX, t0: view.t0, t1: view.t1, moved: false };
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener("pointermove", e => {
+    const w = canvas.clientWidth;
+    if (drag) {
+      const dx = e.clientX - drag.x;
+      if (Math.abs(dx) > 2) drag.moved = true;
+      if (drag.moved) {
+        canvas.classList.add("dragging");
+        const dt = -dx / plotWidth(w) * (drag.t1 - drag.t0);
+        setView(drag.t0 + dt, drag.t1 + dt);
+        showTooltip(null);
+        return;
+      }
+    }
+    hoverT = e.offsetX >= GUTTER && e.offsetX <= w - PAD_R ? tOf(e.offsetX, w) : null;
+    requestDraw();
+    showTooltip(hit(e.offsetX, e.offsetY), e);
+  });
+  canvas.addEventListener("pointerup", () => { drag = null; canvas.classList.remove("dragging"); });
+  canvas.addEventListener("pointerleave", () => { hoverT = null; showTooltip(null); requestDraw(); });
+  canvas.addEventListener("dblclick", e => {
+    if (e.offsetX >= GUTTER) zoomAt(tOf(e.offsetX, canvas.clientWidth), 0.5);
+  });
+}
+
+let drawPending = false;
+function requestDraw() {
+  if (drawPending) return;
+  drawPending = true;
+  requestAnimationFrame(() => {
+    drawPending = false;
+    drawTimeline();
+    drawNavigator();
+    charts.forEach(drawChart);
+  });
+}
+
+// ---------- tables ----------
+function renderTables(totals) {
+  const sum = totals.reduce((a, b) => a + b, 0) || 1;
+  const order = totals.map((t, i) => i).sort((a, b) => totals[b] - totals[a]);
+  const counts = DATA.keys.map(() => 0);
+  DATA.lanes.forEach(l => l.spans.forEach(s => counts[s[2]]++));
+  const maxT = Math.max(1, totals[order[0]] || 0);
+  document.getElementById("by-key").innerHTML =
+    `<tr><th>Kind</th><th class="num">Spans</th><th class="num">Total</th><th class="num">Share</th><th style="width:30%"></th></tr>` +
+    order.map(i => `<tr><td><i class="sw" style="background:${keyColor(i)}"></i> ${esc(DATA.keys[i])}</td>` +
+      `<td class="num">${counts[i].toLocaleString("en-US")}</td><td class="num">${fmtDur(totals[i])}</td>` +
+      `<td class="num">${(totals[i] / sum * 100).toFixed(1)}%</td>` +
+      `<td><span class="bar" style="width:${(totals[i] / maxT * 100).toFixed(1)}%;background:${keyColor(i)}"></span></td></tr>`).join("");
+
+  const cpTotal = DATA.criticalPath.reduce((a, c) => a + c.dur, 0);
+  document.getElementById("cp-total").textContent = DATA.criticalPath.length
+    ? `${DATA.criticalPath.length} components · ${fmtDur(cpTotal)}` : "not in the profile";
+  document.getElementById("critical").innerHTML =
+    `<tr><th>Component</th><th class="num">Start</th><th class="num">Duration</th></tr>` +
+    DATA.criticalPath.map((c, i) => `<tr class="link" data-cp="${i}"><td class="name">${esc(c.name)}</td>` +
+      `<td class="num">${fmtTime(c.start)}</td><td class="num">${fmtDur(c.dur)}</td></tr>`).join("");
+
+  const all = [];
+  DATA.lanes.forEach(l => l.spans.forEach(s => all.push([s, l.name])));
+  all.sort((a, b) => b[0][1] - a[0][1]);
+  const top = all.slice(0, 25);
+  document.getElementById("longest").innerHTML =
+    `<tr><th>Span</th><th>Details</th><th>Lane</th><th class="num">Start</th><th class="num">Duration</th></tr>` +
+    top.map(([s, lane], i) => `<tr class="link" data-long="${i}"><td class="name"><i class="sw" style="background:${keyColor(s[2])}"></i> ${esc(S[s[3]])}${s[5] ? " <span class='sub'>(critical path)</span>" : ""}</td>` +
+      `<td class="sub name">${esc(S[s[4]])}</td><td class="sub">${esc(lane)}</td>` +
+      `<td class="num">${fmtTime(s[0])}</td><td class="num">${fmtDur(s[1])}</td></tr>`).join("");
+
+  document.getElementById("phases").innerHTML =
+    `<tr><th>Phase</th><th class="num">Start</th><th class="num">Duration</th></tr>` +
+    DATA.phases.map(p => `<tr><td>${esc(p.name)}</td><td class="num">${fmtTime(p.start)}</td><td class="num">${fmtDur(p.end - p.start)}</td></tr>`).join("");
+
+  const zoomTo = (start, dur) => {
+    const pad = Math.max(dur * 0.15, (T1 - T0) / 2000);
+    setView(start - pad, start + dur + pad);
+    timeline.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+  document.getElementById("longest").addEventListener("click", e => {
+    const tr = e.target.closest("tr[data-long]");
+    if (tr) { const s = top[+tr.dataset.long][0]; zoomTo(s[0], s[1]); }
+  });
+  document.getElementById("critical").addEventListener("click", e => {
+    const tr = e.target.closest("tr[data-cp]");
+    if (tr) { const c = DATA.criticalPath[+tr.dataset.cp]; zoomTo(c.start, c.dur); }
+  });
+}
+
+// ---------- boot ----------
+function renderMeta() {
+  const m = DATA.meta;
+  const parts = [
+    `Wall time <b>${fmtDur(m.end - Math.max(0, m.start))}</b>`,
+    m.bazelVersion && `Bazel <b>${esc(m.bazelVersion.replace(/^release /, ""))}</b>`,
+    m.date && `Started <b>${esc(new Date(m.date).toLocaleString())}</b>`,
+    m.buildId && `Invocation <b>${esc(m.buildId)}</b>`,
+  ].filter(Boolean);
+  document.getElementById("meta").innerHTML = parts.join(" · ");
+}
+
+readTheme();
+renderMeta();
+const totals = renderLegend();
+buildCharts();
+renderTables(totals);
+attachPlotInteraction(timeline, timelineHit);
+document.getElementById("reset").addEventListener("click", () => setView(T0, T1));
+window.addEventListener("resize", () => { navDensity = null; requestDraw(); });
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readTheme(); requestDraw(); });
+const hashView = /^#view=(-?[\d.]+),(-?[\d.]+)$/.exec(location.hash);
+if (hashView) setView(+hashView[1] * 1e6, +hashView[2] * 1e6);
+requestDraw();
+</script>
+</body>
+</html>
